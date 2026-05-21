@@ -129,42 +129,37 @@ static void track_target() {
     { std::lock_guard<std::mutex> lk(g_mtx); dets = g_dets; }
     if(dets.empty()) return;
 
-    /* Find the LARGEST detection (closest to camera) */
-    int best_tx = 0, best_ty = 0;
-    float best_area = 0.0f;
+    int cx = SCREEN_W / 2;
+    int cy = SCREEN_H / 2;
+
+    int target_x = 0, target_y = 0;
+    float best_dist = 1e9f;
     for(int i = 0; i < (int)dets.size(); i++) {
-        float area = (float)((dets[i].x2 - dets[i].x1) * (dets[i].y2 - dets[i].y1));
-        if(area > best_area) {
-            best_area = area;
-            best_tx = (dets[i].x1 + dets[i].x2) / 2;
-            best_ty = (dets[i].y1 + dets[i].y2) / 2;
+        int bcx = (dets[i].x1 + dets[i].x2) / 2;
+        int bcy = (dets[i].y1 + dets[i].y2) / 2;
+        float dx = (float)(bcx - cx);
+        float dy = (float)(bcy - cy);
+        float dist = sqrtf(dx*dx + dy*dy);
+        if(dist < best_dist) {
+            best_dist = dist;
+            target_x = bcx;
+            target_y = bcy;
         }
     }
 
-    /* Virtual cursor position - starts at screen center, updates each frame */
-    static int virt_x = SCREEN_W/2;
-    static int virt_y = SCREEN_H/2;
+    int dx = target_x - cx;
+    int dy = target_y - cy;
 
-    /* Delta from VIRTUAL cursor to target */
-    int dx = best_tx - virt_x;
-    int dy = best_ty - virt_y;
+    float spd = (float)g_track_speed.load();
+    float factor = 0.05f + (spd - 1.0f) * (0.95f / 99.0f);
 
-    float spd = g_track_speed.load();
-    int divisor = (int)(50.0f - (spd - 1) * 49.0f / 99.0f);
+    int mx = (int)((float)dx * factor);
+    int my = (int)((float)dy * factor);
 
-    /* Move fraction of remaining distance */
-    int mx = dx / divisor;
-    int my = dy / divisor;
-
-    /* Minimum movement: at least 1 pixel if target is not centered */
-    if(dx > 2 && mx == 0) mx = 1;
-    else if(dx < -2 && mx == 0) mx = -1;
-    if(dy > 2 && my == 0) my = 1;
-    else if(dy < -2 && my == 0) my = -1;
-
-    /* Update virtual cursor position */
-    virt_x += mx;
-    virt_y += my;
+    if(dx > 1 && mx == 0) mx = 1;
+    else if(dx < -1 && mx == 0) mx = -1;
+    if(dy > 1 && my == 0) my = 1;
+    else if(dy < -1 && my == 0) my = -1;
 
     INPUT inp = {};
     inp.type = INPUT_MOUSE;
@@ -172,39 +167,6 @@ static void track_target() {
     inp.mi.dy = my;
     inp.mi.dwFlags = MOUSEEVENTF_MOVE;
     SendInput(1, &inp, sizeof(INPUT));
-}
-    }
-
-    /* Delta from screen center to target */
-    int dx = best_tx - SCREEN_W/2;
-    int dy = best_ty - SCREEN_H/2;
-
-    float spd = g_track_speed.load();
-    float factor = 0.1f + (spd - 1) * 0.9f / 99.0f; /* 0.1 to 1.0 */
-
-    /* Move TOWARDS target each frame: fraction of remaining distance */
-    int mx = (int)((float)dx * factor);
-    int my = (int)((float)dy * factor);
-
-    /* Cap max movement per frame to avoid overshoot */
-    const int MAX_MOVE = 30;
-    float mdist = sqrtf((float)(mx*mx + my*my));
-    if(mdist > MAX_MOVE && mdist > 0.1f) {
-        mx = (int)((float)mx / mdist * MAX_MOVE);
-        my = (int)((float)my / mdist * MAX_MOVE);
-    }
-
-    INPUT inp[2] = {};
-    inp[0].type = INPUT_MOUSE;
-    inp[0].mi.dx = mx;
-    inp[0].mi.dy = my;
-    inp[0].mi.dwFlags = MOUSEEVENTF_MOVE;
-    /* Second input to confirm */
-    inp[1].type = INPUT_MOUSE;
-    inp[1].mi.dx = 0;
-    inp[1].mi.dy = 0;
-    inp[1].mi.dwFlags = MOUSEEVENTF_MOVE;
-    SendInput(2, &inp, sizeof(INPUT));
 }
 
 static DWORD WINAPI track_thread(LPVOID) {
@@ -223,6 +185,11 @@ static DWORD WINAPI track_thread(LPVOID) {
         if(pressed) {
             std::vector<Det> dets;
             { std::lock_guard<std::mutex> lk(g_mtx); dets = g_dets; }
+
+            if(dets.empty()) {
+                Sleep(1);
+                continue;
+            }
 
             int target_x = 0, target_y = 0;
 
@@ -271,7 +238,21 @@ static DWORD WINAPI track_thread(LPVOID) {
             if(vx > SCREEN_W-1) vx = (float)(SCREEN_W-1);
             if(vy > SCREEN_H-1) vy = (float)(SCREEN_H-1);
 
-            SetCursorPos((int)vx, (int)vy);
+            static float prev_vx = vx, prev_vy = vy;
+            int mx = (int)(vx - prev_vx);
+            int my = (int)(vy - prev_vy);
+
+            if(mx != 0 || my != 0) {
+                INPUT inp = {};
+                inp.type = INPUT_MOUSE;
+                inp.mi.dx = mx;
+                inp.mi.dy = my;
+                inp.mi.dwFlags = MOUSEEVENTF_MOVE;
+                SendInput(1, &inp, sizeof(INPUT));
+            }
+
+            prev_vx = vx;
+            prev_vy = vy;
 
             last_tx = target_x;
             last_ty = target_y;
